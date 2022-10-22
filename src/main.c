@@ -37,10 +37,7 @@
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 /* UART payload buffer element size. */
-#define UART_BUF_SIZE 20
 
-#define KEY_PASSKEY_ACCEPT DK_BTN1_MSK
-#define KEY_PASSKEY_REJECT DK_BTN2_MSK
 
 #define NUS_WRITE_TIMEOUT K_MSEC(150)
 #define UART_WAIT_FOR_BUF_DELAY K_MSEC(50)
@@ -50,14 +47,7 @@ BUILD_ASSERT(DT_NODE_HAS_COMPAT(DT_CHOSEN(zephyr_console), zephyr_cdc_acm_uart),
 	     "Console device is not ACM CDC UART device");
 
 K_FIFO_DEFINE(ppg_items);
-
 K_SEM_DEFINE(nus_write_sem, 0, 1);
-
-struct uart_data_t {
-	void *fifo_reserved;
-	uint8_t  data[UART_BUF_SIZE];
-	uint16_t len;
-};
 
 
 typedef struct {
@@ -65,8 +55,11 @@ typedef struct {
 	uint32_t red;
 } ppg_item_t;
 
-static K_FIFO_DEFINE(fifo_uart_tx_data);
-static K_FIFO_DEFINE(fifo_uart_rx_data);
+typedef struct {
+    void *fifo_reserved;   /* 1st word reserved for use by FIFO */
+    ppg_item_t ppgitem;
+} fifo_item_t;
+
 
 static struct bt_conn *default_conn;
 static struct bt_nus_client nus_client;
@@ -76,31 +69,20 @@ static void ble_data_sent(struct bt_nus_client *nus, uint8_t err,
 {
 	ARG_UNUSED(nus);
 
-	struct uart_data_t *buf;
-
-	/* Retrieve buffer context. */
-	buf = CONTAINER_OF(data, struct uart_data_t, data);
-	k_free(buf);
-
-	k_sem_give(&nus_write_sem);
-
-	if (err) {
-		LOG_WRN("ATT error code: 0x%02X", err);
-	}
 }
 
 static uint8_t ble_data_received(struct bt_nus_client *nus,
 						const uint8_t *data, uint16_t len)
 {
 	ARG_UNUSED(nus);
-	
-	
-	//ppg_item_t *ppgItem = k_malloc(sizeof(ppg_item_t));
-	
-	ppg_item_t *ppgItem = (ppg_item_t*)data;
-	
-	k_fifo_put(&ppg_items, ppgItem);	
-	printk("%d\n",ppgItem->ir);
+
+	uint8_t datacpy[sizeof(ppg_item_t)];
+	memcpy(datacpy, data, sizeof(ppg_item_t));
+	ppg_item_t *ppgItem = (ppg_item_t*)datacpy;	
+		
+	fifo_item_t *fifo = k_malloc(sizeof(fifo_item_t));
+	fifo->ppgitem = *ppgItem;
+	k_fifo_put(&ppg_items, fifo);		
 				
 	return BT_GATT_ITER_CONTINUE;
 }
@@ -413,7 +395,7 @@ void main(void)
 	scan_init();
 	nus_client_init();	
 
-	printk("Starting Bluetooth Central UART example\n");
+	LOG_INF("Starting Bluetooth Central UART example\n");
 
 
 	err = bt_scan_start(BT_SCAN_TYPE_SCAN_ACTIVE);
@@ -426,12 +408,23 @@ void main(void)
 
 	for (;;) {
 	
-		ppg_item_t *ppgItem = k_fifo_get(&ppg_items, K_FOREVER);
-		 if(ppgItem->red > 0) {
-		 	printk("%d,%d\n",ppgItem->ir, ppgItem->red);
-		} else {
-			printk("%d\n",ppgItem->ir);
-		}
+	
 		k_sleep(K_MSEC(1000));
 	}	
 }
+
+void fifo_print_service(void)
+{		
+	for(;;) {
+		fifo_item_t *fifoItem = k_fifo_get(&ppg_items, K_FOREVER);	
+		if(fifoItem->ppgitem.red > 0) {
+			printk("%d,%d\n",fifoItem->ppgitem.ir, fifoItem->ppgitem.red);
+		} else {
+			printk("%d\n",fifoItem->ppgitem.ir);
+		}			
+		k_free(fifoItem);
+	}
+}
+
+K_THREAD_DEFINE(fifo_print_service_id, 1024, fifo_print_service, NULL, NULL,
+		NULL, 8, 0, 0);
